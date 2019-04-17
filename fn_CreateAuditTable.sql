@@ -4,7 +4,7 @@
 	2) The audited table has to have a LastEditedByUserID for the AuditUserID to be created properly
 	3) This only works with 1 primary key, not composite keys, however it would be fairly easy to modify the result for a composite key or update this function for that purpose
 */
-CREATE FUNCTION fn_CreateAuditTable(
+ALTER FUNCTION fn_CreateAuditTable(
 	@TableName NVARCHAR(255),
 	@PrimaryKey NVARCHAR(255)
 ) RETURNS VARCHAR(MAX)
@@ -23,7 +23,7 @@ AS BEGIN
 
 	--get a list of all the table columns
 	SELECT 
-		@ListStr =  COALESCE(@ListStr +',', '') + '[' + c.Name + '] [' + t.Name + ']' + CASE WHEN t.name like '%Varchar%' THEN '(' + CONVERT(VARCHAR(10), c.max_length) + ')' ELSE '' END,
+		@ListStr =  COALESCE(@ListStr +',', '') + '[' + c.Name + '] [' + t.Name + ']' + CASE WHEN t.name like '%char%' THEN '(' + CONVERT(VARCHAR(10), c.max_length) + ')' ELSE '' END,
 		@Deleted = COALESCE(@Deleted + ',', '') + 'DELETED.' + c.Name,
 		@Inserted = COALESCE(@Inserted + ',', '') + 'INSERTED.' + c.Name,
 		@Normal = COALESCE(@Normal + ',', '') + c.name
@@ -38,7 +38,7 @@ AS BEGIN
 	SET @SQLQuery = 
 	'
 	CREATE TABLE ' + @AuditTableName + '([AuditID] [int] IDENTITY(1,1) NOT NULL, [AuditTypeCode] CHAR, AuditUserID INT, UtcAuditDate DATETIME, ' + @ListStr + ', AuditSystemUsername VARCHAR(255),  
-		CONSTRAINT PK_TEST PRIMARY KEY CLUSTERED 
+		CONSTRAINT' + @ConstraintName + ' PRIMARY KEY CLUSTERED 
 		(
 			[AuditID] ASC
 		)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
@@ -49,23 +49,40 @@ AS BEGIN
 
 	SET @SQLQuery = @SQLQuery + 
 	'
-	CREATE TRIGGER [dbo].[Trg_' + @TableName+ 'Audit] ON [dbo].[' + @TableName+ '] AFTER INSERT, UPDATE NOT FOR REPLICATION
+	CREATE TRIGGER [dbo].[Trg_' + @TableName+ 'Audit] ON [dbo].[' + @TableName+ '] AFTER INSERT, UPDATE, DELETE NOT FOR REPLICATION
 	AS
-	INSERT INTO '+ @AuditTableName + '(AuditTypeCode,AuditUserID,UtcAuditDate,' + @Normal + ',AuditSystemUsername)
+	IF EXISTS(SELECT * FROM DELETED) AND NOT EXISTS(SELECT * FROM INSERTED)
+	BEGIN
+		INSERT INTO '+ @AuditTableName + '(AuditTypeCode,AuditUserID,UtcAuditDate,' + @Normal + ',AuditSystemUsername)
 		SELECT
-			CASE
-				WHEN DELETED.' + @PrimaryKey + ' IS NULL THEN ''I''
-				ELSE ''U''
-			END AS AuditTypeCode,
-			INSERTED.LastEditedByUserID AS AuditUserID,
+			''D'' AS AuditTypeCode,
+			DELETED.LastEditedByUserID AS AuditUserID,
 			GETUTCDATE() AS UtcAuditDate,' 
-			+ @Inserted 
+			+ @Deleted 
 			+ ', SUSER_NAME()
-				FROM INSERTED
-				LEFT JOIN DELETED ON DELETED.' + @PrimaryKey + ' = INSERTED.' + @PrimaryKey + '
-				WHERE (DELETED.'+ @PrimaryKey +' IS NULL)
-				OR     CHECKSUM(''A'',' + @Inserted + ')
-					!= CHECKSUM(''A'',' + @Deleted + ')
+			FROM DELETED
+	END
+
+	IF EXISTS(SELECT * FROM INSERTED)
+	BEGIN
+		INSERT INTO '+ @AuditTableName + '(AuditTypeCode,AuditUserID,UtcAuditDate,' + @Normal + ',AuditSystemUsername)
+			SELECT
+				CASE
+					WHEN DELETED.' + @PrimaryKey + ' IS NULL 
+						THEN ''I''
+					ELSE 
+						''U''
+				END AS AuditTypeCode,
+				INSERTED.LastEditedByUserID AS AuditUserID,
+				GETUTCDATE() AS UtcAuditDate,' 
+				+ @Inserted 
+				+ ', SUSER_NAME()
+					FROM INSERTED
+					LEFT JOIN DELETED ON DELETED.' + @PrimaryKey + ' = INSERTED.' + @PrimaryKey + '
+					WHERE (DELETED.'+ @PrimaryKey +' IS NULL)
+					OR     CHECKSUM(''A'',' + @Inserted + ')
+						!= CHECKSUM(''A'',' + @Deleted + ')
+	END
 
 	GO'
 
